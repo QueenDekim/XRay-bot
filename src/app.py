@@ -80,7 +80,8 @@ async def update_admins_status():
                 new_admin = User(
                     telegram_id=admin_id,
                     full_name=f"Admin {admin_id}",
-                    is_admin=True
+                    is_admin=True,
+                    subscription_end=datetime.now() + timedelta(days=365)
                 )
                 session.add(new_admin)
         
