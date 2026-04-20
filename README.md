@@ -39,23 +39,21 @@ cd XRay-bot
 2. Установите зависимости:
 
 ```bash
-python -m venv .venv # python3 если исползуете Linux
-.venv\Scripts\activate
-# source .venv/bin/activate если исползуете Linux
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
 3. Настройте переменные окружения:
 
 ```bash
-cp src\.env.example src\.env # "/" вместо "\" если исползуете Linux
-# Отредактируйте .env файл со своими значениями
+cp src/.env.example src/.env  # Отредактируйте .env файл со своими значениями
 ```
 
 4. Запустите бота:
 
 ```bash
-python src\app.py # python3 и "/" вместо "\" если исползуете Linux
+python src/app.py
 ```
 
 ### Настройка переменных окружения

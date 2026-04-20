@@ -1,9 +1,11 @@
 import asyncio
 import logging
 import json
+import io
+import qrcode
 from datetime import datetime, timedelta
 from aiogram import Dispatcher, Router, F, Bot
-from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
+from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -14,7 +16,11 @@ from database import (
     get_all_users, create_static_profile, get_static_profiles, 
     User, Session, get_user_stats as db_user_stats
 )
-from functions import create_vless_profile, delete_client_by_email, generate_vless_url, get_user_stats, create_static_client, get_global_stats, get_online_users
+from functions import (
+    create_vless_profile, delete_client_by_email, generate_vless_url, 
+    get_user_stats, create_static_client, get_global_stats, 
+    get_online_users, generate_sub_url
+)
 
 logger = logging.getLogger(__name__)
 
@@ -165,9 +171,9 @@ async def help_msg(callback: CallbackQuery):
         "<b>Разработчики:</b>\n"
         "@QueenDekim | @cpn_moris\n"
         "<i>Отдельное спасибо</i> @ascento <i>за помощь в разработке</i>\n"
-        "<a href='https://t.me/+OJsul9nc9hYzZjEy'>Официальный чат проекта</a>"
+        #"<a href='https://t.me/+OJsul9nc9hYzZjEy'>Официальный чат проекта</a>"
     )
-    await callback.message.answer(text, parse_mode='HTML', reply_markup=builder.as_markup())
+    await callback.message.edit_text(text, parse_mode='HTML', reply_markup=builder.as_markup())
 
 @router.callback_query(F.data == "renew_sub")
 async def renew_subscription(callback: CallbackQuery):
@@ -546,14 +552,34 @@ async def process_static_profile_name(message: Message, state: FSMContext):
     
     if profile_data:
         vless_url = generate_vless_url(profile_data)
-        await create_static_profile(profile_name, vless_url)
+        sub_id = profile_data.get("sub_id")
+        sub_url = generate_sub_url(sub_id) if sub_id else vless_url
+        
+        # Генерация QR-кода локально
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(sub_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        # Сохранение в буфер
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
+        
+        await create_static_profile(profile_name, sub_url)
         profiles = await get_static_profiles()
         for profile in profiles:
             if profile.name == profile_name:
                 id = profile.id
         builder = InlineKeyboardBuilder()
         builder.button(text="🗑️ Удалить", callback_data=f"delete_static_{id}")
-        await message.answer(f"Профиль создан!\n\n`{vless_url}`", reply_markup=builder.as_markup(), parse_mode='Markdown')
+        await message.answer_photo(
+            photo=photo,
+            caption=f"Профиль создан!\n\n`{sub_url}`", 
+            reply_markup=builder.as_markup(), 
+            parse_mode='Markdown'
+        )
     else:
         await message.answer("Ошибка при создании профиля")
     
@@ -569,9 +595,24 @@ async def static_profile_list(callback: CallbackQuery):
     for profile in profiles:
         builder = InlineKeyboardBuilder()
         builder.button(text="🗑️ Удалить", callback_data=f"delete_static_{profile.id}")
-        await callback.message.answer(
-            f"**{profile.name}**\n`{profile.vless_url}`", 
-            reply_markup=builder.as_markup(), parse_mode='Markdown'
+        
+        # Генерация QR-кода локально
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(profile.vless_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        # Сохранение в буфер
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
+        
+        await callback.message.answer_photo(
+            photo=photo,
+            caption=f"**{profile.name}**\n`{profile.vless_url}`", 
+            reply_markup=builder.as_markup(), 
+            parse_mode='Markdown'
         )
 
 @router.callback_query(F.data.startswith("delete_static_"))
@@ -629,25 +670,49 @@ async def connect_profile(callback: CallbackQuery):
         await callback.message.answer("⚠️ У вас пока нет созданного профиля.")
         return
     vless_url = generate_vless_url(profile_data)
+    sub_id = profile_data.get("sub_id")
+    sub_url = generate_sub_url(sub_id) if sub_id else vless_url
+    
+    # Генерация QR-кода локально
+    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+    qr.add_data(sub_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Сохранение в буфер
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0)
+    photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
+    
     text = (
         "🎉 **Ваш VPN профиль готов!**\n\n"
         "ℹ️ **Инструкция по подключению:**\n"
         "1. Скачайте приложение для вашей платформы\n"
         "2. Скопируйте эту ссылку и импортируйте в приложение:\n\n"
-        f"`{vless_url}`\n\n"
-        "3. Активируйте соединение в приложении."
+        f"`{sub_url}`\n\n"
+        "3. Или отсканируйте QR-код.\n"
+        "4. Активируйте соединение в приложении."
     )
 
     builder = InlineKeyboardBuilder()
-    builder.button(text='🖥️ Windows [V2RayN]', url='https://github.com/2dust/v2rayN/releases/download/7.13.8/v2rayN-windows-64-desktop.zip')
-    builder.button(text='🐧 Linux [NekoBox]', url='https://github.com/MatsuriDayo/nekoray/releases/download/4.0.1/nekoray-4.0.1-2024-12-12-debian-x64.deb')
-    builder.button(text='🍎 Mac [V2RayU]', url='https://github.com/yanue/V2rayU/releases/download/v4.2.6/V2rayU-64.dmg ')
+    # builder.button(text='🖥️ Windows [V2RayN]', url='https://github.com/2dust/v2rayN/releases/download/7.13.8/v2rayN-windows-64-desktop.zip')
+    # builder.button(text='🐧 Linux [NekoBox]', url='https://github.com/MatsuriDayo/nekoray/releases/download/4.0.1/nekoray-4.0.1-2024-12-12-debian-x64.deb')
+    # builder.button(text='🍎 Mac [V2RayU]', url='https://github.com/yanue/V2rayU/releases/download/v4.2.6/V2rayU-64.dmg ')
     builder.button(text='🍏 iOS [V2RayTun]', url='https://apps.apple.com/ru/app/v2raytun/id6476628951')
+    builder.button(text='🍏 iOS [Happ]', url='https://apps.apple.com/us/app/happ-proxy-utility/id6504287215')
     builder.button(text='🤖 Android [V2RayNG]', url='https://github.com/2dust/v2rayNG/releases/download/1.10.16/v2rayNG_1.10.16_arm64-v8a.apk')
+    builder.button(text='🤖 Android [Happ]', url='https://github.com/Happ-proxy/happ-android/releases/download/3.15.1/Happ.apk')
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     builder.adjust(2, 2, 1, 1)
 
-    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode='Markdown')
+    await callback.message.answer_photo(
+        photo=photo,
+        caption=text,
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+    await callback.message.delete()
 
 @router.callback_query(F.data == "stats")
 async def user_stats(callback: CallbackQuery):
@@ -676,7 +741,9 @@ async def user_stats(callback: CallbackQuery):
         f"🔼 Загружено: `{upload} {upload_size}`\n"
         f"🔽 Скачано: `{download} {download_size}`\n"
     )
-    await callback.message.answer(text, parse_mode='Markdown')
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ Назад", callback_data="back_to_menu")
+    await callback.message.answer(text, parse_mode='Markdown', reply_markup=builder.as_markup())
 
 @router.callback_query(F.data == "admin_network_stats")
 async def network_stats(callback: CallbackQuery):
@@ -697,12 +764,18 @@ async def network_stats(callback: CallbackQuery):
         "📊 **Статистика использования сети:**\n\n"
         f"🔼 Upload - `{upload} {upload_size}` | 🔽 Download - `{download} {download_size}`"
     )
-    await callback.message.edit_text(text, parse_mode='Markdown')
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ Назад", callback_data="admin_menu")
+    await callback.message.edit_text(text, parse_mode='Markdown', reply_markup=builder.as_markup())
 
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery, bot: Bot):
     await callback.answer()
-    await show_menu(bot, callback.from_user.id, callback.message.message_id)
+    if callback.message.photo:
+        await callback.message.delete()
+        await show_menu(bot, callback.from_user.id)
+    else:
+        await show_menu(bot, callback.from_user.id, callback.message.message_id)
 
 def setup_handlers(dp: Dispatcher):
     dp.include_router(router)

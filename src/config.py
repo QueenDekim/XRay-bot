@@ -10,10 +10,12 @@ class Config(BaseModel):
     ADMINS: List[int] = Field(default_factory=list)
     XUI_API_URL: str = os.getenv("XUI_API_URL", "http://localhost:54321")
     XUI_BASE_PATH: str = os.getenv("XUI_BASE_PATH", "/panel")
+    XUI_SUB_PORT: str = os.getenv("XUI_SUB_PORT", "54321")
     XUI_USERNAME: str = os.getenv("XUI_USERNAME", "admin")
     XUI_PASSWORD: str = os.getenv("XUI_PASSWORD", "admin")
     XUI_HOST: str = os.getenv("XUI_HOST", "your-server.com")
     XUI_SERVER_NAME: str = os.getenv("XUI_SERVER_NAME", "domain.com")
+    XUI_VERIFY_SSL: bool = Field(default=os.getenv("XUI_VERIFY_SSL", "True").lower() == "true")
     PAYMENT_TOKEN: str = os.getenv("PAYMENT_TOKEN", "")
     INBOUND_ID: int = Field(default=os.getenv("INBOUND_ID", 1))
     REALITY_PUBLIC_KEY: str = os.getenv("REALITY_PUBLIC_KEY", "")
@@ -29,6 +31,7 @@ class Config(BaseModel):
         6: {"base_price": 1500, "discount_percent": 20},
         12: {"base_price": 3000, "discount_percent": 30}
     }
+    SUBSCRIPTION_URL_BASE: str = os.getenv("SUBSCRIPTION_URL_BASE", "")
 
     @field_validator('ADMINS', mode='before')
     def parse_admins(cls, value):

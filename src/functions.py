@@ -17,8 +17,10 @@ class XUIAPI:
     async def login(self):
         """Аутентификация в 3x-UI API"""
         try:
-            # Создаем новую сессию с общей куки-банкой
+            # Создаем новую сессию с общей куки-банкой и настройкой SSL
+            connector = aiohttp.TCPConnector(ssl=config.XUI_VERIFY_SSL)
             self.session = aiohttp.ClientSession(
+                connector=connector,
                 cookie_jar=self.cookie_jar,
                 trust_env=True  # Доверять переменным окружения для прокси
             )
@@ -132,6 +134,40 @@ class XUIAPI:
             logger.exception(f"🛑 Update inbound error: {e}")
             return False
 
+    async def _get_flow_from_inbound(self, inbound: dict) -> str:
+        """Получает flow из настроек инбаунда или streamSettings"""
+        try:
+            # Пробуем получить из settings
+            settings = json.loads(inbound.get("settings", "{}"))
+            
+            # Сначала проверяем streamSettings для Reality
+            stream_settings = json.loads(inbound.get("streamSettings", "{}"))
+            reality_settings = stream_settings.get("realitySettings", {})
+            
+            # Если есть Reality настройки, проверяем flow
+            if reality_settings:
+                # Проверяем settings -> clients на наличие flow
+                clients = settings.get("clients", [])
+                if clients and len(clients) > 0:
+                    existing_flow = clients[0].get("flow", "")
+                    if existing_flow:
+                        return existing_flow
+                
+                # Если в streamSettings есть flow
+                return reality_settings.get("flow", "")
+            
+            # Проверяем наличие flow в существующих клиентах
+            clients = settings.get("clients", [])
+            if clients and len(clients) > 0:
+                existing_flow = clients[0].get("flow", "")
+                if existing_flow:
+                    return existing_flow
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get flow from inbound: {e}")
+        
+        return ""
+    
     async def create_vless_profile(self, telegram_id: int):
         """Создание нового клиента для пользователя"""
         if not await self.login():
@@ -150,19 +186,24 @@ class XUIAPI:
             client_id = str(uuid.uuid4())
             email = f"user_{telegram_id}_{random.randint(1000,9999)}"
             
+            # Получаем flow из инбаунда
+            flow = await self._get_flow_from_inbound(inbound)
+            
             # Обновленные настройки для Reality
+            # Генерируем постоянный UUID для subscription на основе telegram_id
+            sub_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user_{telegram_id}"))
+            
             new_client = {
                 "id": client_id,
-                "flow": "",
+                "flow": flow,
                 "email": email,
                 "limitIp": 0,
                 "totalGB": 0,
                 "expiryTime": 0,
                 "enable": True,
                 "tgId": "",
-                "subId": "",
+                "subId": sub_id,
                 "reset": 0,
-                # Добавляем настройки для Reality
                 "fingerprint": config.REALITY_FINGERPRINT,
                 "publicKey": config.REALITY_PUBLIC_KEY,
                 "shortId": config.REALITY_SHORT_ID,
@@ -185,7 +226,6 @@ class XUIAPI:
                 "settings": json.dumps(settings, indent=2),
                 "streamSettings": inbound["streamSettings"],
                 "sniffing": inbound["sniffing"],
-                # "allocate": inbound["allocate"]
             }
             
             if await self.update_inbound(config.INBOUND_ID, update_data):
@@ -193,15 +233,14 @@ class XUIAPI:
                     "client_id": client_id,
                     "email": email,
                     "port": inbound["port"],
-                    # Указываем тип безопасности как reality
                     "security": "reality",
                     "remark": inbound["remark"],
-                    # Добавляем необходимые параметры для Reality
                     "sni": config.REALITY_SNI,
                     "pbk": config.REALITY_PUBLIC_KEY,
                     "fp": config.REALITY_FINGERPRINT,
                     "sid": config.REALITY_SHORT_ID,
-                    "spx": config.REALITY_SPIDER_X
+                    "spx": config.REALITY_SPIDER_X,
+                    "sub_id": sub_id
                 }
             return None
         except Exception as e:
@@ -225,19 +264,24 @@ class XUIAPI:
             
             client_id = str(uuid.uuid4())
             
+            # Генерируем постоянный UUID для subscription на основе имени профиля
+            sub_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"static_{profile_name}"))
+            
+            # Получаем flow из инбаунда
+            flow = await self._get_flow_from_inbound(inbound)
+            
             # Обновленные настройки для Reality
             new_client = {
                 "id": client_id,
-                "flow": "",
+                "flow": flow,
                 "email": profile_name,
                 "limitIp": 0,
                 "totalGB": 0,
                 "expiryTime": 0,
                 "enable": True,
                 "tgId": "",
-                "subId": "",
+                "subId": sub_id,
                 "reset": 0,
-                # Добавляем настройки для Reality
                 "fingerprint": config.REALITY_FINGERPRINT,
                 "publicKey": config.REALITY_PUBLIC_KEY,
                 "shortId": config.REALITY_SHORT_ID,
@@ -260,7 +304,6 @@ class XUIAPI:
                 "settings": json.dumps(settings, indent=2),
                 "streamSettings": inbound["streamSettings"],
                 "sniffing": inbound["sniffing"],
-                # "allocate": inbound["allocate"]
             }
             
             if await self.update_inbound(config.INBOUND_ID, update_data):
@@ -276,7 +319,8 @@ class XUIAPI:
                     "pbk": config.REALITY_PUBLIC_KEY,
                     "fp": config.REALITY_FINGERPRINT,
                     "sid": config.REALITY_SHORT_ID,
-                    "spx": config.REALITY_SPIDER_X
+                    "spx": config.REALITY_SPIDER_X,
+                    "sub_id": sub_id
                 }
             return None
         except Exception as e:
@@ -471,6 +515,18 @@ async def get_user_stats(email: str):
         return await api.get_user_stats(email)
     finally:
         await api.close()
+
+def generate_sub_url(sub_id: str) -> str:
+    """Генерирует ссылку на подписку"""
+    if not config.SUBSCRIPTION_URL_BASE:
+        # Пытаемся сформировать на основе XUI_API_URL, но с портом для подписок
+        # Извлекаем схему и хост из XUI_API_URL
+        from urllib.parse import urlparse
+        parsed = urlparse(config.XUI_API_URL)
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname or "localhost"
+        return f"{scheme}://{host}:{config.XUI_SUB_PORT}/sub/{sub_id}"
+    return f"{config.SUBSCRIPTION_URL_BASE.rstrip('/')}/{sub_id}"
 
 def generate_vless_url(profile_data: dict) -> str:
     remark = profile_data.get('remark', '')
