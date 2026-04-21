@@ -14,12 +14,13 @@ from config import config
 from database import (
     StaticProfile, get_user, create_user, update_subscription, 
     get_all_users, create_static_profile, get_static_profiles, 
-    User, Session, get_user_stats as db_user_stats
+    User, Session, get_user_stats as db_user_stats, delete_user
 )
 from functions import (
     create_vless_profile, delete_client_by_email, generate_vless_url, 
     get_user_stats, create_static_client, get_global_stats, 
-    get_online_users, generate_sub_url
+    get_online_users, generate_sub_url, update_client_expiry, get_safe_expiry_timestamp,
+    force_update_profile_expiry
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class AdminStates(StatesGroup):
     ADD_TIME_AMOUNT = State()
     REMOVE_TIME_AMOUNT = State()
     SEND_MESSAGE_TARGET = State()
+    DELETE_USER = State()
 
 def split_text(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list:
     """Разбивает текст на части указанной максимальной длины"""
@@ -161,6 +163,195 @@ async def menu_cmd(message: Message, bot: Bot):
     
     await show_menu(bot, message.from_user.id)
 
+@router.message(Command("renew"))
+async def renew_cmd(message: Message, bot: Bot):
+    """Слеш команда для продления/оплаты подписки"""
+    user = await get_user(message.from_user.id)
+    if not user:
+        await start_cmd(message, bot)
+        return
+    
+    # Создаем клавиатуру с вариантами подписки
+    builder = InlineKeyboardBuilder()
+    
+    # Добавляем кнопки для каждого варианта подписки
+    for months in sorted(config.PRICES.keys()):
+        price_info = config.PRICES[months]
+        final_price = config.calculate_price(months)
+        
+        discount_text = ""
+        if price_info["discount_percent"] > 0:
+            discount_text = f" (-{price_info['discount_percent']}%)"
+            
+        button_text = f"{months} мес. - {final_price} руб.{discount_text}"
+        builder.button(text=button_text, callback_data=f"pay_{months}")
+    
+    builder.button(text="⬅️ Назад", callback_data="back_to_menu")
+    builder.adjust(1)
+    
+    await message.answer(
+        "💵 **Выберите период подписки:**",
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+@router.message(Command("connect"))
+async def connect_cmd(message: Message, bot: Bot):
+    """Слеш команда для подключения к VPN"""
+    user = await get_user(message.from_user.id)
+    if not user:
+        await start_cmd(message, bot)
+        return
+    
+    if user.subscription_end < datetime.utcnow():
+        await message.answer("⚠️ Подписка истекла! Продлите подписку.")
+        return
+    
+    if not user.vless_profile_data:
+        await message.answer("⚙️ Создаем ваш VPN профиль...")
+        # Рассчитываем expiry_time в timestamp для 3x-ui
+        logger.info(f"📅 [connect_cmd] User subscription_end: {user.subscription_end}")
+        expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+        logger.info(f"📅 [connect_cmd] Calculated expiry_time: {expiry_time}")
+        profile_data = await create_vless_profile(user.telegram_id, expiry_time)
+        
+        if profile_data:
+            with Session() as session:
+                db_user = session.query(User).filter_by(telegram_id=user.telegram_id).first()
+                if db_user:
+                    db_user.vless_profile_data = json.dumps(profile_data)
+                    session.commit()
+            user = await get_user(user.telegram_id)
+        else:
+            await message.answer("🛑 Ошибка при создании профиля. Попробуйте позже.")
+            return
+    
+    profile_data = safe_json_loads(user.vless_profile_data, default={})
+    if not profile_data:
+        await message.answer("⚠️ У вас пока нет созданного профиля.")
+        return
+    
+    # Проверяем и исправляем expiry_time в 3x-ui если нужно
+    try:
+        email = profile_data.get("email")
+        if email:
+            current_expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+            logger.info(f"🔍 [connect_cmd] Profile exists, email: {email}, current_expiry_time: {current_expiry_time}")
+            
+            # Проверяем, нужно ли обновить (сравниваем с текущим timestamp пользователя)
+            # Если в базе дата корректная, обновляем в 3x-ui
+            if current_expiry_time > 0:  # Если подписка активна
+                logger.info(f"🔄 Checking and updating profile expiry for user {user.telegram_id}")
+                result = await force_update_profile_expiry(email, user.subscription_end)
+                logger.info(f"🔄 Force update result: {result}")
+            else:
+                logger.warning(f"⚠️ Subscription is expired or invalid, not updating profile")
+    except Exception as e:
+        logger.error(f"🛑 Error auto-updating profile expiry: {e}")
+    
+    vless_url = generate_vless_url(profile_data)
+    sub_id = profile_data.get("sub_id")
+    sub_url = generate_sub_url(sub_id) if sub_id else vless_url
+    
+    # Генерация QR-кода локально
+    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+    qr.add_data(sub_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    
+    # Сохранение в буфер
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0)
+    photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
+    
+    text = (
+        "📲 Как подключить VPN\n"
+        "1. Нажмите кнопку «Подключиться»\n"
+        "Откроется страница с вашим VPN-профилем.\n\n"
+        "2.Пролистайте страницу вниз\n"
+        "Найдите кнопки с вашей операционной системой:\n"
+        "📱 Android\n"
+        "🍏 iPhone (iOS)\n\n"
+        "3. Выберите свою систему\n"
+        "Откроется список приложений.\n"
+        "👉 Выберите любое приложение из списка.\n\n"
+        "4.Установите приложение\n"
+        "Если оно не установлено — скачайте его.\n\n"
+        "5. Нажмите на выбранное приложение ещё раз\n\n"
+        "Ключ добавится автоматически — вручную ничего вставлять не нужно.\n\n"
+        "6. Подключитесь к VPN\n"
+        "Откроется приложение — нажмите:\n"
+        "👉 Подключиться / Connect\n\n"
+        "✅ Готово\n"
+        "VPN включён — интернет работает без ограничений 🚀\n\n"
+        "💡 Если не получилось\n"
+        "попробуйте другое приложение из списка\n"
+        "или заново нажмите «Подключиться» в боте"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text='Подключится', url='https://'+sub_url)
+    builder.button(text="⬅️ В меню", callback_data="back_to_menu")
+    builder.adjust(1, 1)
+
+    await message.answer_photo(
+        photo=photo,
+        caption=text,
+        reply_markup=builder.as_markup(),
+        parse_mode='Markdown'
+    )
+
+@router.message(Command("stats"))
+async def stats_cmd(message: Message, bot: Bot):
+    """Слеш команда для показа статистики"""
+    user = await get_user(message.from_user.id)
+    if not user or not user.vless_profile_data:
+        await message.answer("⚠️ Профиль не создан")
+        return
+    
+    await message.answer("⚙️ Загружаем вашу статистику...")
+    profile_data = safe_json_loads(user.vless_profile_data, default={})
+    stats = await get_user_stats(profile_data["email"])
+
+    logger.debug(stats)
+    upload = f"{stats.get('upload', 0) / 1024 / 1024:.2f}"
+    upload_size = 'MB' if int(float(upload)) < 1024 else 'GB'
+    if upload_size == "GB":
+        upload = f"{int(float(upload) / 1024):.2f}"
+
+    download = f"{stats.get('download', 0) / 1024 / 1024:.2f}"
+    download_size = 'MB' if int(float(download)) < 1024 else 'GB'
+    if download_size == "GB":
+        download = f"{int(float(download) / 1024):.2f}"
+
+    text = (
+        "📊 **Ваша статистика:**\n\n"
+        f"🔼 Загружено: `{upload} {upload_size}`\n"
+        f"🔽 Скачано: `{download} {download_size}`\n"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ В меню", callback_data="back_to_menu")
+    
+    await message.answer(text, parse_mode='Markdown', reply_markup=builder.as_markup())
+
+@router.message(Command("help"))
+async def help_cmd(message: Message, bot: Bot):
+    """Слеш команда для показа справки"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ В меню", callback_data="back_to_menu")
+    
+    text = (
+        f"О боте:\n"
+        #"<b>Разработчики:</b>\n"
+        #"@QueenDekim | @cpn_moris\n"
+        #"<i>Отдельное спасибо</i> @ascento <i>за помощь в разработке</i>\n"
+        # "По вопросам технической поддержки: @your_username_or_chat"
+    )
+    
+    await message.answer(text, parse_mode='HTML', reply_markup=builder.as_markup())
+
 @router.callback_query(F.data == "help")
 async def help_msg(callback: CallbackQuery):
     await callback.answer()
@@ -168,10 +359,10 @@ async def help_msg(callback: CallbackQuery):
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
     text = (
         f"О боте:\n"
-        "<b>Разработчики:</b>\n"
-        "@QueenDekim | @cpn_moris\n"
-        "<i>Отдельное спасибо</i> @ascento <i>за помощь в разработке</i>\n"
-        #"<a href='https://t.me/+OJsul9nc9hYzZjEy'>Официальный чат проекта</a>"
+        #"<b>Разработчики:</b>\n"
+        #"@QueenDekim | @cpn_moris\n"
+        #"<i>Отдельное спасибо</i> @ascento <i>за помощь в разработке</i>\n"
+        # "По вопросам технической поддержки: @your_username_or_chat"
     )
     await callback.message.edit_text(text, parse_mode='HTML', reply_markup=builder.as_markup())
 
@@ -260,6 +451,22 @@ async def process_successful_payment(message: Message, bot: Bot):
             success = await update_subscription(message.from_user.id, months)
             suffix = "месяц" if months == 1 else "месяца" if months in (2,3,4) else "месяцев"
             if success:
+                # Получаем обновленные данные пользователя
+                updated_user = await get_user(message.from_user.id)
+                
+                # Если у пользователя есть профиль, обновляем expiry_time в 3x-ui
+                if updated_user and updated_user.vless_profile_data:
+                    try:
+                        profile_data = safe_json_loads(updated_user.vless_profile_data, default={})
+                        email = profile_data.get("email")
+                        if email:
+                            expiry_time = get_safe_expiry_timestamp(updated_user.subscription_end)
+                            logger.info(f"📅 Updating expiry time for user {message.from_user.id}: {expiry_time}")
+                            await update_client_expiry(email, expiry_time)
+                            logger.info(f"✅ Updated expiry time in 3x-ui for user {message.from_user.id}")
+                    except Exception as e:
+                        logger.error(f"🛑 Failed to update expiry time in 3x-ui: {e}")
+                
                 await message.answer(
                     f"✅ Оплата прошла успешно! Ваша подписка {action_type} на {months} {suffix}.\n\n"
                     "Спасибо за покупку! 🎉"
@@ -304,10 +511,13 @@ async def admin_menu(callback: CallbackQuery):
     builder.button(text="+ время", callback_data="admin_add_time")
     builder.button(text="- время", callback_data="admin_remove_time")
     builder.button(text="📋 Список пользователей", callback_data="admin_user_list")
+    builder.button(text="🗑️ Удалить пользователя", callback_data="admin_delete_user")
+    builder.button(text="🔍 Проверить подписки", callback_data="admin_check_subscriptions")
     builder.button(text="📊 Статистика исп. сети", callback_data="admin_network_stats")
+    builder.button(text="🔧 Исправить профили", callback_data="admin_fix_profiles")
     builder.button(text="📢 Рассылка", callback_data="admin_send_message")
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
-    builder.adjust(2, 1, 1, 1, 1)
+    builder.adjust(2, 1, 1, 1, 1, 1, 1, 1)
     
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode='Markdown')
 
@@ -355,6 +565,20 @@ async def admin_add_time_amount(message: Message, state: FSMContext):
                 else:
                     user.subscription_end = datetime.utcnow() + timedelta(seconds=total_seconds)
                 session.commit()
+                
+                # Обновляем expiry_time в 3x-ui если у пользователя есть профиль
+                if user.vless_profile_data:
+                    try:
+                        profile_data = safe_json_loads(user.vless_profile_data, default={})
+                        email = profile_data.get("email")
+                        if email:
+                            expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+                            logger.info(f"📅 Admin add time for user {user_id}: {expiry_time}")
+                            await update_client_expiry(email, expiry_time)
+                            logger.info(f"✅ Updated expiry time in 3x-ui for user {user_id} (admin add time)")
+                    except Exception as e:
+                        logger.error(f"🛑 Failed to update expiry time in 3x-ui for user {user_id}: {e}")
+                
                 await message.answer(f"✅ Добавлено время пользователю {user_id}")
             else:
                 await message.answer("❌ Пользователь не найден")
@@ -407,6 +631,20 @@ async def admin_remove_time_amount(message: Message, state: FSMContext):
                     new_end = datetime.utcnow()
                 user.subscription_end = new_end
                 session.commit()
+                
+                # Обновляем expiry_time в 3x-ui если у пользователя есть профиль
+                if user.vless_profile_data:
+                    try:
+                        profile_data = safe_json_loads(user.vless_profile_data, default={})
+                        email = profile_data.get("email")
+                        if email:
+                            expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+                            logger.info(f"📅 Admin remove time for user {user_id}: {expiry_time}")
+                            await update_client_expiry(email, expiry_time)
+                            logger.info(f"✅ Updated expiry time in 3x-ui for user {user_id} (admin remove time)")
+                    except Exception as e:
+                        logger.error(f"🛑 Failed to update expiry time in 3x-ui for user {user_id}: {e}")
+                
                 await message.answer(f"✅ Удалено время у пользователя {user_id}")
             else:
                 await message.answer("❌ Пользователь не найден")
@@ -652,7 +890,11 @@ async def connect_profile(callback: CallbackQuery):
     
     if not user.vless_profile_data:
         await callback.message.edit_text("⚙️ Создаем ваш VPN профиль...")
-        profile_data = await create_vless_profile(user.telegram_id)
+        # Рассчитываем expiry_time в timestamp для 3x-ui
+        logger.info(f"📅 [connect_profile] User subscription_end: {user.subscription_end}")
+        expiry_time = get_safe_expiry_timestamp(user.subscription_end)
+        logger.info(f"📅 [connect_profile] Calculated expiry_time: {expiry_time}")
+        profile_data = await create_vless_profile(user.telegram_id, expiry_time)
         
         if profile_data:
             with Session() as session:
@@ -686,25 +928,34 @@ async def connect_profile(callback: CallbackQuery):
     photo = BufferedInputFile(img_byte_arr.getvalue(), filename="qr.png")
     
     text = (
-        "🎉 **Ваш VPN профиль готов!**\n\n"
-        "ℹ️ **Инструкция по подключению:**\n"
-        "1. Скачайте приложение для вашей платформы\n"
-        "2. Скопируйте эту ссылку и импортируйте в приложение:\n\n"
-        f"`{sub_url}`\n\n"
-        "3. Или отсканируйте QR-код.\n"
-        "4. Активируйте соединение в приложении."
+        "📲 Как подключить VPN\n"
+        "1. Нажмите кнопку «Подключиться» или отсканируйте QR код\n"
+        "Откроется страница с вашим VPN-профилем.\n\n"
+        "2.Пролистайте страницу вниз\n"
+        "Найдите кнопки с вашей операционной системой:\n"
+        "📱 Android\n"
+        "🍏 iPhone (iOS)\n\n"
+        "3. Выберите свою систему\n"
+        "Откроется список приложений.\n"
+        "👉 Выберите любое приложение из списка.\n\n"
+        "4.Установите приложение\n"
+        "Если оно не установлено — скачайте его.\n\n"
+        "5. Нажмите на выбранное приложение ещё раз\n\n"
+        "Ключ добавится автоматически — вручную ничего вставлять не нужно.\n\n"
+        "6. Подключитесь к VPN\n"
+        "Откроется приложение — нажмите:\n"
+        "👉 Подключиться / Connect\n\n"
+        "✅ Готово\n"
+        "VPN включён — интернет работает без ограничений 🚀\n\n"
+        "💡 Если не получилось\n"
+        "попробуйте другое приложение из списка\n"
+        "или заново нажмите «Подключиться» в боте"
     )
 
     builder = InlineKeyboardBuilder()
-    # builder.button(text='🖥️ Windows [V2RayN]', url='https://github.com/2dust/v2rayN/releases/download/7.13.8/v2rayN-windows-64-desktop.zip')
-    # builder.button(text='🐧 Linux [NekoBox]', url='https://github.com/MatsuriDayo/nekoray/releases/download/4.0.1/nekoray-4.0.1-2024-12-12-debian-x64.deb')
-    # builder.button(text='🍎 Mac [V2RayU]', url='https://github.com/yanue/V2rayU/releases/download/v4.2.6/V2rayU-64.dmg ')
-    builder.button(text='🍏 iOS [V2RayTun]', url='https://apps.apple.com/ru/app/v2raytun/id6476628951')
-    builder.button(text='🍏 iOS [Happ]', url='https://apps.apple.com/us/app/happ-proxy-utility/id6504287215')
-    builder.button(text='🤖 Android [V2RayNG]', url='https://github.com/2dust/v2rayNG/releases/download/1.10.16/v2rayNG_1.10.16_arm64-v8a.apk')
-    builder.button(text='🤖 Android [Happ]', url='https://github.com/Happ-proxy/happ-android/releases/download/3.15.1/Happ.apk')
+    builder.button(text='Подключится', url='https://'+sub_url)
     builder.button(text="⬅️ Назад", callback_data="back_to_menu")
-    builder.adjust(2, 2, 1, 1)
+    builder.adjust(1, 1)
 
     await callback.message.answer_photo(
         photo=photo,
@@ -767,6 +1018,211 @@ async def network_stats(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад", callback_data="admin_menu")
     await callback.message.edit_text(text, parse_mode='Markdown', reply_markup=builder.as_markup())
+
+@router.callback_query(F.data == "admin_fix_profiles")
+async def admin_fix_profiles(callback: CallbackQuery):
+    """Исправляет все профили с неправильными датами"""
+    await callback.answer("⏳ Исправляем профили...")
+    
+    try:
+        # Сначала исправляем даты в базе данных
+        from database import fix_all_subscription_dates, get_users_with_profiles
+        fixed_db_count = await fix_all_subscription_dates()
+        
+        # Получаем всех пользователей с профилями
+        users = await get_users_with_profiles()
+        
+        # Обновляем профили в 3x-ui
+        success_count = 0
+        fail_count = 0
+        
+        for user in users:
+            if user.vless_profile_data:
+                try:
+                    profile_data = safe_json_loads(user.vless_profile_data, default={})
+                    email = profile_data.get("email")
+                    if email:
+                        result = await force_update_profile_expiry(email, user.subscription_end)
+                        if result:
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                except Exception as e:
+                    logger.error(f"🛑 Error fixing profile for user {user.telegram_id}: {e}")
+                    fail_count += 1
+        
+        text = (
+            f"🔧 **Исправление профилей завершено:**\n\n"
+            f"📊 Исправлено дат в БД: `{fixed_db_count}`\n"
+            f"✅ Обновлено профилей в 3x-ui: `{success_count}`\n"
+            f"❌ Ошибок обновления: `{fail_count}`\n\n"
+            f"📋 Всего проверено пользователей: `{len(users)}`"
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад", callback_data="admin_menu")
+        await callback.message.edit_text(text, parse_mode='Markdown', reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        logger.error(f"🛑 Error in admin_fix_profiles: {e}")
+        await callback.message.answer(f"❌ Ошибка при исправлении профилей: {str(e)}")
+
+@router.callback_query(F.data == "admin_check_subscriptions")
+async def admin_check_subscriptions(callback: CallbackQuery):
+    """Проверяет и исправляет расхождения между 3x-ui и базой данных"""
+    await callback.answer("⏳ Проверяем подписки...")
+    
+    try:
+        from functions import check_and_fix_subscriptions
+        
+        # Проверяем и исправляем подписки
+        stats = await check_and_fix_subscriptions()
+        
+        if "error" in stats:
+            text = (
+                f"❌ **Ошибка при проверке подписок:**\n\n"
+                f"📋 {stats['error']}"
+            )
+        else:
+            # Формируем детальный отчёт
+            text = (
+                f"🔍 **Проверка подписок завершена:**\n\n"
+                f"📊 **Статистика:**\n"
+                f"• Всего клиентов в 3x-ui: `{stats['total_3xui']}`\n"
+                f"• Всего пользователей в БД: `{stats['total_db']}`\n"
+                f"• Совпадают: `{stats['matched']}` ✅\n"
+                f"• Расхождения: `{stats['mismatch']}` ⚠️\n"
+                f"• Исправлено: `{stats['fixed']}` 🔧\n"
+                f"• Нет в БД: `{stats['not_in_db']}` ℹ️\n\n"
+            )
+            
+            # Добавляем детальную информацию о проблемах
+            problems = [d for d in stats['details'] if d['status'] in ['mismatch', 'fix_failed', 'fix_error']]
+            if problems:
+                text += f"⚠️ **Проблемы ({len(problems)}):**\n\n"
+                for i, problem in enumerate(problems[:10], 1):  # Показываем первые 10
+                    email = problem['email']
+                    status_emoji = {
+                        'mismatch': '⚠️',
+                        'fix_failed': '❌',
+                        'fix_error': '🛑'
+                    }.get(problem['status'], '❓')
+                    
+                    text += f"{i}. {status_emoji} `{email}`\n"
+                    
+                    if problem['status'] == 'mismatch':
+                        from datetime import datetime
+                        expiry_3xui = datetime.fromtimestamp(problem['expiry_3xui']).strftime('%d-%m-%Y %H:%M') if problem['expiry_3xui'] > 0 else 'Истёк'
+                        expiry_db = datetime.fromtimestamp(problem['expiry_db']).strftime('%d-%m-%Y %H:%M') if problem['expiry_db'] > 0 else 'Истёк'
+                        text += f"   3x-ui: {expiry_3xui}\n"
+                        text += f"   БД: {expiry_db}\n"
+                    elif problem['status'] == 'fix_error':
+                        text += f"   Ошибка: {problem.get('error', 'Неизвестно')}\n"
+                    
+                    text += "\n"
+                
+                if len(problems) > 10:
+                    text += f"... и ещё {len(problems) - 10} проблем\n\n"
+            
+            # Добавляем информацию об исправленных
+            fixed = [d for d in stats['details'] if d['status'] == 'fixed']
+            if fixed:
+                text += f"✅ **Исправлено ({len(fixed)}):**\n\n"
+                for i, fix in enumerate(fixed[:5], 1):  # Показываем первые 5
+                    text += f"{i}. `{fix['email']}`\n"
+                
+                if len(fixed) > 5:
+                    text += f"... и ещё {len(fixed) - 5}\n\n"
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ Назад", callback_data="admin_menu")
+        await callback.message.edit_text(text, parse_mode='Markdown', reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        logger.error(f"🛑 Error in admin_check_subscriptions: {e}")
+        await callback.message.answer(f"❌ Ошибка при проверке подписок: {str(e)}")
+
+@router.callback_query(F.data == "admin_delete_user")
+async def admin_delete_user_start(callback: CallbackQuery, state: FSMContext):
+    """Начало процесса удаления пользователя"""
+    await callback.answer()
+    await callback.message.answer("🗑️ **Удаление пользователя**\n\nВведите Telegram ID пользователя для удаления:", parse_mode='Markdown')
+    await state.set_state(AdminStates.DELETE_USER)
+
+@router.message(AdminStates.DELETE_USER)
+async def admin_delete_user_process(message: Message, state: FSMContext):
+    """Обработка ввода Telegram ID для удаления"""
+    try:
+        telegram_id = int(message.text)
+        
+        # Проверяем существование пользователя
+        user = await get_user(telegram_id)
+        
+        if not user:
+            await message.answer(f"❌ Пользователь с Telegram ID `{telegram_id}` не найден")
+            await state.clear()
+            return
+        
+        # Подтверждение удаления
+        username = f"@{user.username}" if user.username else "отсутствует"
+        text = (
+            f"⚠️ **Подтвердите удаление:**\n\n"
+            f"👤 **Имя:** `{user.full_name}`\n"
+            f"📱 **Username:** `{username}`\n"
+            f"🆔 **Telegram ID:** `{user.telegram_id}`\n"
+            f"📅 **Регистрация:** `{user.registration_date.strftime('%d-%m-%Y %H:%M')}`\n"
+            f"⏰ **Подписка до:** `{user.subscription_end.strftime('%d-%m-%Y %H:%M')}`\n"
+            f"🔧 **Профиль:** `{'Есть' if user.vless_profile_data else 'Нет'}`\n\n"
+            f"❗️ **Это действие необратимо!**"
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="✅ Подтвердить удаление", callback_data=f"confirm_delete_{telegram_id}")
+        builder.button(text="❌ Отмена", callback_data="admin_menu")
+        builder.adjust(1)
+        
+        await message.answer(text, parse_mode='Markdown', reply_markup=builder.as_markup())
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("❌ Ошибка: Telegram ID должен быть числом")
+    except Exception as e:
+        logger.error(f"🛑 Error in admin_delete_user_process: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+        await state.clear()
+
+@router.callback_query(F.data.startswith("confirm_delete_"))
+async def admin_confirm_delete_user(callback: CallbackQuery):
+    """Подтверждение и удаление пользователя"""
+    await callback.answer()
+    
+    try:
+        telegram_id = int(callback.data.split("_")[2])
+        
+        # Удаляем пользователя
+        result = await delete_user(telegram_id)
+        
+        if result:
+            text = (
+                f"✅ **Пользователь удалён**\n\n"
+                f"🆔 Telegram ID: `{telegram_id}`\n\n"
+                f"Профиль в 3x-ui также был удалён (если существовал)."
+            )
+        else:
+            text = (
+                f"❌ **Ошибка удаления**\n\n"
+                f"🆔 Telegram ID: `{telegram_id}`\n\n"
+                f"Пользователь не найден в базе данных."
+            )
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="⬅️ В админ-меню", callback_data="admin_menu")
+        
+        await callback.message.edit_text(text, parse_mode='Markdown', reply_markup=builder.as_markup())
+        
+    except Exception as e:
+        logger.error(f"🛑 Error in admin_confirm_delete_user: {e}")
+        await callback.message.answer(f"❌ Ошибка при удалении: {str(e)}")
 
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery, bot: Bot):

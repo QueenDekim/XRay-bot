@@ -88,6 +88,25 @@ async def update_admins_status():
         session.commit()
     logger.info("✅ Admin status updated in database")
 
+async def setup_bot_commands(bot: Bot):
+    """Регистрация команд бота в меню Telegram"""
+    from aiogram.types import BotCommand
+    
+    commands = [
+        BotCommand(command="start", description="🚀 Запуск бота"),
+        BotCommand(command="menu", description="📋 Главное меню"),
+        BotCommand(command="renew", description="💵 Продлить подписку"),
+        BotCommand(command="connect", description="✅ Подключить VPN"),
+        BotCommand(command="stats", description="📊 Статистика"),
+        BotCommand(command="help", description="ℹ️ Справка"),
+    ]
+    
+    try:
+        await bot.set_my_commands(commands)
+        logger.info("✅ Bot commands registered successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to register bot commands: {e}")
+
 async def main():
     bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher()
@@ -101,6 +120,12 @@ async def main():
     except Exception as e:
         logger.error(f"❌ Database initialization error: {e}")
         return
+    
+    try:
+        # Регистрируем команды бота
+        await setup_bot_commands(bot)
+    except Exception as e:
+        logger.error(f"❌ Bot commands setup error: {e}")
     
     try:
         setup_handlers(dp)
