@@ -311,7 +311,7 @@ The bot supports a flexible pricing system:
 
 ---
 
-## Donation USDT (TON Space):
+## Donation USDT (TON Network):
 
 | QR Code                      | Address                                            |
 | ---------------------------- | -------------------------------------------------- |
