@@ -310,7 +310,7 @@ vless://{client_id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&fp=
 
 ---
 
-## Donation USDT (TON Space):
+## Donation USDT (TON Network):
 
 | QR Code                      | Address                                            |
 | ---------------------------- | -------------------------------------------------- |
