@@ -310,6 +310,12 @@ vless://{client_id}@{host}:{port}?type=tcp&security=reality&pbk={public_key}&fp=
 
 ---
 
+## Donation USDT (TON Space):
+
+| QR Code                      | Address                                          |
+| ---------------------------- | ------------------------------------------------ |
+| ![QR-code](docs/qr-code.jpg) | UQA9SigQDdUlZhFj3C5L71gFwjs2kSZu1b9g7Huu1PQujrVS |
+
 | Demo - Полностью функциональный бот                    | Связь с разработчиком                            |
 | ------------------------------------------------------ | ------------------------------------------------ |
 | Telegram: [@Dekim_vpn_bot](https://t.me/Dekim_vpn_bot) | Telegram: [@QueenDek1m](https://t.me/QueenDek1m) |
