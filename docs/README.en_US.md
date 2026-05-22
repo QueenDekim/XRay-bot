@@ -311,6 +311,12 @@ The bot supports a flexible pricing system:
 
 ---
 
+## Donation USDT (TON Space):
+
+| QR Code                      | Address                                          |
+| ---------------------------- | ------------------------------------------------ |
+| ![QR-code](./qr-code.jpg) | UQA9SigQDdUlZhFj3C5L71gFwjs2kSZu1b9g7Huu1PQujrVS |
+
 | Demo - Fully functional bot                            | Communication with the developer                 |
 | ------------------------------------------------------ | ------------------------------------------------ |
 | Telegram: [@Dekim_vpn_bot](https://t.me/Dekim_vpn_bot) | Telegram: [@QueenDek1m](https://t.me/QueenDek1m) |
